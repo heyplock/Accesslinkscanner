@@ -3,7 +3,6 @@
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python)
 ![Status](https://img.shields.io/badge/Status-Active-brightgreen)
 ![Windows](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)
-![MIT](https://img.shields.io/badge/License-MIT-green)
 
 ---
 
