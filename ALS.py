@@ -1,5 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore")
 import socket
 import requests
 import urllib3
@@ -10,17 +8,34 @@ import os
 import concurrent.futures
 import re
 from ipwhois import IPWhois
+import warnings
+
+# Masquer les warnings moches dans la console Python
+warnings.filterwarnings("ignore")
 
 # === Couleurs ===
 GREEN = "\033[92m"
 RED = "\033[91m"
 RESET = "\033[0m"
+BLUE = "\033[94m"
+YELLOW = "\033[93m"
 
 CONFIG_PATH = Path("config.json")
 DEFAULT_CONFIG = {
     "ports": [80, 443],
     "timeout": 5
 }
+
+def print_banner():
+    print(f"""{GREEN}
+╔══════════════════════════════════════════════════╗
+║   🛠️  Multitool - Scanner HTTP/HTTPS stylisé   ║
+╚══════════════════════════════════════════════════╝
+{RESET}""")
+
+def print_menu():
+    print(f"{YELLOW}👉 Entrez une adresse IP ou un nom de domaine")
+    print(f"{RED}📌 Tape 'P' pour gérer les ports, 'T' pour le timeout\n{RESET}")
 
 def load_config():
     if CONFIG_PATH.exists():
@@ -74,7 +89,6 @@ def print_ip_whois(ip):
         org = res.get('network', {}).get('org', 'Inconnu')
 
         all_mails = set()
-
         for contact in res.get('objects', {}).values():
             email = contact.get('contact', {}).get('email')
             if isinstance(email, list):
@@ -87,7 +101,6 @@ def print_ip_whois(ip):
                 all_mails.add(email)
             elif isinstance(email, dict) and 'value' in email and '@' in email['value']:
                 all_mails.add(email['value'])
-
             remarks = contact.get('remarks', [])
             if remarks is None:
                 remarks = []
@@ -105,22 +118,21 @@ def print_ip_whois(ip):
                         if '@' in part:
                             all_mails.add(part)
 
-        # Trie pour mettre les emails d'abuse en priorité
         abuse_first = sorted(all_mails, key=lambda m: (not m.lower().startswith('abuse') and 'abuse' not in m.lower(), m))
-        print(f"\n🌍 Fournisseur/Org : {org} | Réseau : {provider}")
+        print(f"{BLUE}🌍 WHOIS INFOS pour {ip}:{RESET}")
+        print(f"   → Fournisseur/Org : {YELLOW}{org}{RESET} | Réseau : {YELLOW}{provider}{RESET}")
         if abuse_first:
-            print(f"📧 Adresse(s) abuse trouvée(s) : {', '.join(abuse_first)}")
+            print(f"   → 📧 Abuse : {GREEN}{', '.join(abuse_first)}{RESET}")
         else:
-            print(f"📧 Adresse abuse : Non trouvée")
+            print(f"   → 📧 Abuse : {RED}Non trouvée{RESET}")
     except Exception as e:
         print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
 
-
 def scan(ip, ports, timeout):
-    print(f"\n🔎 Résultats pour {ip} (timeout : {timeout}s) :\n")
+    print(f"\n🔍 {GREEN}Scan de {ip} (timeout {timeout}s){RESET}")
+    print(f"{'-'*48}")
     results = []
 
-    # Fonction unique pour thread : (proto, port)
     def scan_one(args):
         port, proto = args
         url = f"{proto}://{ip}:{port}"
@@ -130,31 +142,23 @@ def scan(ip, ports, timeout):
         else:
             return (False, url)
 
-    # On prépare toutes les combinaisons (port, proto)
-    jobs = []
-    for port in ports:
-        for proto in ["http", "https"]:
-            jobs.append((port, proto))
+    jobs = [(port, proto) for port in ports for proto in ["http", "https"]]
 
-    # ThreadPool : scan parallèle
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         for result, url in executor.map(scan_one, jobs):
-            if result:
-                print(f"{GREEN}✅ {url}{RESET}")
-            else:
-                print(f"{RED}❌ {url}{RESET}")
+            status = f"{GREEN}OUVERT{RESET}" if result else f"{RED}FERMÉ{RESET}"
+            print(f"{'✅' if result else '❌'} {url.ljust(28)}  [{status}]")
 
-    print("\n" + "-"*50 + "\n")
-
-    # Whois uniquement si c'est une IPv4 publique ou privée
+    print(f"{'-'*48}")
     if re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
         print_ip_whois(ip)
+    print(f"{'-'*48}\n")
 
 def manage_ports(config):
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\n⚙️  Gestion des ports à scanner")
-        print(f"Ports actuels : {config['ports']}")
+        print(f"{BLUE}\n⚙️  Gestion des ports à scanner{RESET}")
+        print(f"Ports actuels : {YELLOW}{config['ports']}{RESET}")
         print("1. ➕ Ajouter un port")
         print("2. ➖ Retirer un port")
         print("3. 🔙 Retour\n")
@@ -171,11 +175,11 @@ def manage_ports(config):
                 if port not in config['ports']:
                     config['ports'].append(port)
                     save_config(config)
-                    print(f"✅ Port {port} ajouté.")
+                    print(f"{GREEN}✅ Port {port} ajouté.{RESET}")
                 else:
-                    print("⚠️  Port déjà présent.")
+                    print(f"{RED}⚠️  Port déjà présent.{RESET}")
             else:
-                print("❌ Invalide.")
+                print(f"{RED}❌ Invalide.{RESET}")
             input("Appuie sur Entrée pour continuer...")
         elif key == '2':
             port_input = input("➡️  Entrez un port à retirer : ").strip()
@@ -184,11 +188,11 @@ def manage_ports(config):
                 if port in config['ports']:
                     config['ports'].remove(port)
                     save_config(config)
-                    print(f"✅ Port {port} retiré.")
+                    print(f"{GREEN}✅ Port {port} retiré.{RESET}")
                 else:
-                    print("⚠️  Ce port n'existe pas.")
+                    print(f"{RED}⚠️  Ce port n'existe pas.{RESET}")
             else:
-                print("❌ Invalide.")
+                print(f"{RED}❌ Invalide.{RESET}")
             input("Appuie sur Entrée pour continuer...")
         elif key == '3' or key == readchar.key.ESC:
             os.system('cls' if os.name == 'nt' else 'clear')
@@ -197,18 +201,18 @@ def manage_ports(config):
 
 def manage_timeout(config):
     os.system('cls' if os.name == 'nt' else 'clear')
-    print(f"\n⏱️  Timeout actuel : {config['timeout']} seconde(s)")
+    print(f"{BLUE}\n⏱️  Timeout actuel : {YELLOW}{config['timeout']} seconde(s){RESET}")
     timeout_input = input("➡️  Entrez un nouveau timeout (en secondes) : ").strip()
     try:
         new_timeout = float(timeout_input)
         if new_timeout > 0:
             config['timeout'] = new_timeout
             save_config(config)
-            print(f"✅ Timeout mis à jour : {new_timeout} seconde(s)")
+            print(f"{GREEN}✅ Timeout mis à jour : {new_timeout} seconde(s){RESET}")
         else:
-            print("❌ Doit être > 0.")
+            print(f"{RED}❌ Doit être > 0.{RESET}")
     except ValueError:
-        print("❌ Nombre invalide.")
+        print(f"{RED}❌ Nombre invalide.{RESET}")
     input("Appuie sur Entrée pour continuer...")
     os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -217,11 +221,9 @@ def main():
     config = load_config()
 
     while True:
-        # NE PAS clear l'écran ici, pour garder l'historique
-        print("============================================")
-        print("🛠️  Multitool - Scanner HTTP/HTTPS simplifié\n")
-        print("👉 Entrez une adresse IP ou un nom de domaine")
-        print("📌 Tape 'P' pour gérer les ports, 'T' pour le timeout\n")
+        # Pas de clear ici, pour garder l'historique
+        print_banner()
+        print_menu()
 
         key = readchar.readkey()
         if key.lower() == 'p':
@@ -229,7 +231,7 @@ def main():
         elif key.lower() == 't':
             manage_timeout(config)
         elif key == readchar.key.CTRL_C:
-            print("\nFermeture du programme.")
+            print(f"{RED}\nFermeture du programme.{RESET}")
             break
         else:
             print(key, end="", flush=True)
