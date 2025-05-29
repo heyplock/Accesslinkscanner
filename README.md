@@ -17,6 +17,7 @@ Made for network techs and pentesters, it allows you to:
 - Interactively edit ports to scan and timeout, **with settings saved between runs**
 
 Perfect for quickly checking available web services on any network (work, home, clients...) and finding the proper abuse contact in one click.
+THIS APP IS FULLY AI-BASED !
 
 ---
 
