@@ -2,15 +2,15 @@ import socket
 import requests
 import urllib3
 import json
+import re
 from pathlib import Path
 import readchar
 import os
 import concurrent.futures
-import re
 from ipwhois import IPWhois
 import warnings
+from datetime import datetime
 
-# Masquer les warnings moches dans la console Python
 warnings.filterwarnings("ignore")
 
 # === Couleurs ===
@@ -20,24 +20,38 @@ RESET = "\033[0m"
 BLUE = "\033[94m"
 YELLOW = "\033[93m"
 
-CONFIG_PATH = Path("config.json")
+CONFIG_PATH = Path.home() / "Documents" / "AccessLinkScanner" / "config.json"
 DEFAULT_CONFIG = {
     "ports": [80, 443],
-    "timeout": 5
+    "timeout": 5,
+    "logging": False,
+    "whois": True
 }
 
 def print_banner():
     print(f"""{GREEN}
 ╔══════════════════════════════════════════════════╗
-║   🛠️  Multitool - Scanner HTTP/HTTPS stylisé   ║
+║   🛠️  ALS - HTTP/S & WHOIS DOMAIN AND IP SCANNER ║
 ╚══════════════════════════════════════════════════╝
 {RESET}""")
 
-def print_menu():
-    print(f"{YELLOW}👉 Entrez une adresse IP ou un nom de domaine")
-    print(f"{RED}📌 Tape 'P' pour gérer les ports, 'T' pour le timeout\n{RESET}")
+def print_menu(first=False, config=None):
+    if first:
+        print(f"{YELLOW}👉 Entrez une adresse IP ou un nom de domaine")
+        print(f"{RED}📌 Tape 'P' pour gérer les ports, 'T' pour le timeout, 'L' pour activer/désactiver les logs, 'W' pour activer/désactiver WHOIS ou CTRL+C pour quitter{RESET}\n")
+    else:
+        line = f"{YELLOW}👉 Entrez une adresse IP ou un nom de domaine{RESET}"
+        if config is not None:
+            if config.get('logging'):
+                line += f"   {GREEN}[LOG ACTIF]{RESET}"
+            if config.get('whois', True):
+                line += f"   {BLUE}[WHOIS ON]{RESET}"
+            else:
+                line += f"   {RED}[WHOIS OFF]{RESET}"
+        print(line)
 
 def load_config():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r") as f:
             return json.load(f)
@@ -46,6 +60,7 @@ def load_config():
         return DEFAULT_CONFIG.copy()
 
 def save_config(config):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=4)
 
@@ -63,23 +78,62 @@ def check_protocol(ip, port, protocol, timeout_value):
         return False
 
 def is_valid_ip_or_domain(target):
-    # IPv4 stricte
     ip_regex = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
     if ip_regex.match(target):
-        # Vérification valeur (pas plus de 255 par octet)
         try:
             parts = [int(p) for p in target.split(".")]
             if all(0 <= part <= 255 for part in parts):
                 return True
         except:
             return False
-    # Domaines style domaine.tld
     domain_regex = re.compile(
         r"^(?=.{1,253}$)(?!-)([a-zA-Z0-9-]{1,63}\.)+[a-zA-Z]{2,}$"
     )
     if domain_regex.match(target):
         return True
     return False
+
+def write_log(content):
+    log_path = CONFIG_PATH.parent / "scan.log"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(content + "\n")
+
+def get_ip_whois_log(ip):
+    try:
+        obj = IPWhois(ip)
+        res = obj.lookup_rdap(depth=2)
+        provider = res.get('network', {}).get('name', 'Inconnu')
+        org = res.get('network', {}).get('org', 'Inconnu')
+        all_mails = set()
+        for contact in res.get('objects', {}).values():
+            email = contact.get('contact', {}).get('email')
+            if isinstance(email, list):
+                for em in email:
+                    if isinstance(em, str) and '@' in em:
+                        all_mails.add(em)
+                    elif isinstance(em, dict) and 'value' in em and '@' in em['value']:
+                        all_mails.add(em['value'])
+            elif isinstance(email, str) and '@' in email:
+                all_mails.add(email)
+            elif isinstance(email, dict) and 'value' in email and '@' in email['value']:
+                all_mails.add(email['value'])
+            remarks = contact.get('remarks', []) or []
+            for remark in remarks:
+                if isinstance(remark, dict):
+                    descrs = remark.get('description', []) or []
+                    for descr in descrs:
+                        for part in descr.split():
+                            if '@' in part:
+                                all_mails.add(part)
+                elif isinstance(remark, str):
+                    for part in remark.split():
+                        if '@' in part:
+                            all_mails.add(part)
+        abuse_first = sorted(all_mails, key=lambda m: (not m.lower().startswith('abuse') and 'abuse' not in m.lower(), m))
+        log =  f"WHOIS pour {ip}: Fournisseur/Org : {org} | Réseau : {provider} | Abuse : {', '.join(abuse_first) if abuse_first else 'Non trouvée'}"
+        return log
+    except Exception as e:
+        return f"Impossible d'obtenir les infos Whois pour cette IP : {e}"
 
 def print_ip_whois(ip):
     try:
@@ -101,14 +155,10 @@ def print_ip_whois(ip):
                 all_mails.add(email)
             elif isinstance(email, dict) and 'value' in email and '@' in email['value']:
                 all_mails.add(email['value'])
-            remarks = contact.get('remarks', [])
-            if remarks is None:
-                remarks = []
+            remarks = contact.get('remarks', []) or []
             for remark in remarks:
                 if isinstance(remark, dict):
-                    descrs = remark.get('description', [])
-                    if descrs is None:
-                        descrs = []
+                    descrs = remark.get('description', []) or []
                     for descr in descrs:
                         for part in descr.split():
                             if '@' in part:
@@ -117,7 +167,6 @@ def print_ip_whois(ip):
                     for part in remark.split():
                         if '@' in part:
                             all_mails.add(part)
-
         abuse_first = sorted(all_mails, key=lambda m: (not m.lower().startswith('abuse') and 'abuse' not in m.lower(), m))
         print(f"{BLUE}🌍 WHOIS INFOS pour {ip}:{RESET}")
         print(f"   → Fournisseur/Org : {YELLOW}{org}{RESET} | Réseau : {YELLOW}{provider}{RESET}")
@@ -128,10 +177,11 @@ def print_ip_whois(ip):
     except Exception as e:
         print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
 
-def scan(ip, ports, timeout):
+def scan(ip, ports, timeout, logging=False, whois=True):
+    log_lines = []
+    log_lines.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scan de {ip} (timeout {timeout}s) :")
     print(f"\n🔍 {GREEN}Scan de {ip} (timeout {timeout}s){RESET}")
     print(f"{'-'*48}")
-    results = []
 
     def scan_one(args):
         port, proto = args
@@ -148,11 +198,16 @@ def scan(ip, ports, timeout):
         for result, url in executor.map(scan_one, jobs):
             status = f"{GREEN}OUVERT{RESET}" if result else f"{RED}FERMÉ{RESET}"
             print(f"{'✅' if result else '❌'} {url.ljust(28)}  [{status}]")
+            log_lines.append(f"{'✅' if result else '❌'} {url}  [{'OUVERT' if result else 'FERMÉ'}]")
 
     print(f"{'-'*48}")
-    if re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
+    if whois and re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
+        whois_str = get_ip_whois_log(ip)
         print_ip_whois(ip)
+        log_lines.append(whois_str)
     print(f"{'-'*48}\n")
+    if logging:
+        write_log('\n'.join(log_lines))
 
 def manage_ports(config):
     while True:
@@ -166,7 +221,7 @@ def manage_ports(config):
         try:
             key = readchar.readkey()
         except UnicodeDecodeError:
-            continue  # Clear screen and redisplay the menu
+            continue
 
         if key == '1':
             port_input = input("➡️  Entrez un port à ajouter : ").strip()
@@ -197,7 +252,6 @@ def manage_ports(config):
         elif key == '3' or key == readchar.key.ESC:
             os.system('cls' if os.name == 'nt' else 'clear')
             break
-        # Si touche inconnue ou erreur, on clear et redisplay le menu sans message
 
 def manage_timeout(config):
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -218,18 +272,32 @@ def manage_timeout(config):
 
 def main():
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    warnings.filterwarnings("ignore")
     config = load_config()
 
+    print_banner()
+    print_menu(first=True, config=config)
+
+    first_run = True
     while True:
-        # Pas de clear ici, pour garder l'historique
-        print_banner()
-        print_menu()
+        if not first_run:
+            print_menu(first=False, config=config)
+        else:
+            first_run = False
 
         key = readchar.readkey()
         if key.lower() == 'p':
             manage_ports(config)
         elif key.lower() == 't':
             manage_timeout(config)
+        elif key.lower() == 'l':
+            config['logging'] = not config.get('logging', False)
+            save_config(config)
+            print(f"{GREEN if config['logging'] else RED}Logs {'activés' if config['logging'] else 'désactivés'} !{RESET}")
+        elif key.lower() == 'w':
+            config['whois'] = not config.get('whois', True)
+            save_config(config)
+            print(f"{BLUE if config['whois'] else RED}WHOIS {'activé' if config['whois'] else 'désactivé'} !{RESET}")
         elif key == readchar.key.CTRL_C:
             print(f"{RED}\nFermeture du programme.{RESET}")
             break
@@ -238,9 +306,14 @@ def main():
             ip = key + input()
             target = ip.strip()
             if is_valid_ip_or_domain(target):
-                scan(target, config['ports'], config['timeout'])
+                scan(target, config['ports'], config['timeout'],
+                     logging=config.get('logging', False),
+                     whois=config.get('whois', True))
             else:
                 print(f"{RED}❌ Adresse IP ou nom de domaine invalide : {target}{RESET}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{RED}Arrêt du programme demandé par l'utilisateur (CTRL+C). À bientôt !{RESET}")
