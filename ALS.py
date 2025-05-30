@@ -317,3 +317,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print(f"\n{RED}Arrêt du programme demandé par l'utilisateur (CTRL+C). À bientôt !{RESET}")
+
