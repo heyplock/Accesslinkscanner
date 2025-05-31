@@ -20,6 +20,8 @@ RESET = "\033[0m"
 BLUE = "\033[94m"
 YELLOW = "\033[93m"
 
+SEP_WIDTH = 70
+
 CONFIG_PATH = Path.home() / "Documents" / "AccessLinkScanner" / "config.json"
 DEFAULT_CONFIG = {
     "ports": [80, 443],
@@ -28,17 +30,18 @@ DEFAULT_CONFIG = {
     "whois": True
 }
 
+def print_separator(style="-"):
+    print("\n" + style*SEP_WIDTH + "\n")
+
 def print_banner():
-    print(f"""{GREEN}
-╔══════════════════════════════════════════════════╗
-║   🛠️  ALS - HTTP/S & WHOIS DOMAIN AND IP SCANNER ║
-╚══════════════════════════════════════════════════╝
-{RESET}""")
+    print_separator("=")
+    print(f"{GREEN}🛠️  Multitool - Scanner HTTP/HTTPS stylisé{RESET}")
+    print_separator("=")
 
 def print_menu(first=False, config=None):
     if first:
         print(f"{YELLOW}👉 Entrez une adresse IP ou un nom de domaine")
-        print(f"{RED}📌 Tape 'P' pour gérer les ports, 'T' pour le timeout, 'L' pour activer/désactiver les logs, 'W' pour activer/désactiver WHOIS ou CTRL+C pour quitter{RESET}\n")
+        print(f"{RED}📌 Tape 'P' pour gérer les ports, 'T' pour le timeout, 'L' pour activer/désactiver les logs, 'W' pour activer/désactiver WHOIS{RESET}\n")
     else:
         line = f"{YELLOW}👉 Entrez une adresse IP ou un nom de domaine{RESET}"
         if config is not None:
@@ -175,13 +178,16 @@ def print_ip_whois(ip):
         else:
             print(f"   → 📧 Abuse : {RED}Non trouvée{RESET}")
     except Exception as e:
+        print_separator("-")
         print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
+        print_separator("-")
 
 def scan(ip, ports, timeout, logging=False, whois=True):
     log_lines = []
     log_lines.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scan de {ip} (timeout {timeout}s) :")
-    print(f"\n🔍 {GREEN}Scan de {ip} (timeout {timeout}s){RESET}")
-    print(f"{'-'*48}")
+    print_separator("-")
+    print(f"🔍 {GREEN}Scan de {ip} (timeout {timeout}s){RESET}")
+    print_separator("-")
 
     def scan_one(args):
         port, proto = args
@@ -200,29 +206,32 @@ def scan(ip, ports, timeout, logging=False, whois=True):
             print(f"{'✅' if result else '❌'} {url.ljust(28)}  [{status}]")
             log_lines.append(f"{'✅' if result else '❌'} {url}  [{'OUVERT' if result else 'FERMÉ'}]")
 
-    print(f"{'-'*48}")
+    # print_separator("-")
     if whois and re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
-        whois_str = get_ip_whois_log(ip)
-        print_ip_whois(ip)
-        log_lines.append(whois_str)
-    print(f"{'-'*48}\n")
+        try:
+            whois_str = get_ip_whois_log(ip)
+            print_ip_whois(ip)
+            log_lines.append(whois_str)
+        except Exception as e:
+            print_separator("-")
+            print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
+            print_separator("-")
+    # print_separator("-")
     if logging:
         write_log('\n'.join(log_lines))
 
 def manage_ports(config):
+    print_separator("=")
+    print(f"{BLUE}⚙️  Gestion des ports à scanner{RESET}")
+    print(f"Ports actuels : {YELLOW}{config['ports']}{RESET}")
+    print("1. ➕ Ajouter un port")
+    print("2. ➖ Retirer un port")
+    print("3. 🔙 Retour\n")
+    print_separator("=")
+
     while True:
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"{BLUE}\n⚙️  Gestion des ports à scanner{RESET}")
-        print(f"Ports actuels : {YELLOW}{config['ports']}{RESET}")
-        print("1. ➕ Ajouter un port")
-        print("2. ➖ Retirer un port")
-        print("3. 🔙 Retour\n")
-
-        try:
-            key = readchar.readkey()
-        except UnicodeDecodeError:
-            continue
-
+        key = readchar.readkey()
+        action_done = False
         if key == '1':
             port_input = input("➡️  Entrez un port à ajouter : ").strip()
             if port_input.isdigit():
@@ -236,6 +245,8 @@ def manage_ports(config):
             else:
                 print(f"{RED}❌ Invalide.{RESET}")
             input("Appuie sur Entrée pour continuer...")
+            print_separator("=")
+            action_done = True
         elif key == '2':
             port_input = input("➡️  Entrez un port à retirer : ").strip()
             if port_input.isdigit():
@@ -249,13 +260,16 @@ def manage_ports(config):
             else:
                 print(f"{RED}❌ Invalide.{RESET}")
             input("Appuie sur Entrée pour continuer...")
+            print_separator("=")
+            action_done = True
         elif key == '3' or key == readchar.key.ESC:
-            os.system('cls' if os.name == 'nt' else 'clear')
+            if not action_done:
+                pass
             break
 
 def manage_timeout(config):
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print(f"{BLUE}\n⏱️  Timeout actuel : {YELLOW}{config['timeout']} seconde(s){RESET}")
+    print_separator("=")
+    print(f"{BLUE}⏱️  Timeout actuel : {YELLOW}{config['timeout']} seconde(s){RESET}")
     timeout_input = input("➡️  Entrez un nouveau timeout (en secondes) : ").strip()
     try:
         new_timeout = float(timeout_input)
@@ -268,7 +282,7 @@ def manage_timeout(config):
     except ValueError:
         print(f"{RED}❌ Nombre invalide.{RESET}")
     input("Appuie sur Entrée pour continuer...")
-    os.system('cls' if os.name == 'nt' else 'clear')
+    print_separator("=")
 
 def main():
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -294,10 +308,12 @@ def main():
             config['logging'] = not config.get('logging', False)
             save_config(config)
             print(f"{GREEN if config['logging'] else RED}Logs {'activés' if config['logging'] else 'désactivés'} !{RESET}")
+            print_separator("=")
         elif key.lower() == 'w':
             config['whois'] = not config.get('whois', True)
             save_config(config)
             print(f"{BLUE if config['whois'] else RED}WHOIS {'activé' if config['whois'] else 'désactivé'} !{RESET}")
+            print_separator("=")
         elif key == readchar.key.CTRL_C:
             print(f"{RED}\nFermeture du programme.{RESET}")
             break
@@ -317,4 +333,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print(f"\n{RED}Arrêt du programme demandé par l'utilisateur (CTRL+C). À bientôt !{RESET}")
-
+        import sys
+        sys.exit(0)
