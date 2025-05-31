@@ -10,6 +10,9 @@ import concurrent.futures
 from ipwhois import IPWhois
 import warnings
 from datetime import datetime
+from prompt_toolkit import PromptSession
+
+session = PromptSession()
 
 warnings.filterwarnings("ignore")
 
@@ -183,30 +186,92 @@ def print_ip_whois(ip):
         print_separator("-")
 
 def scan(ip, ports, timeout, logging=False, whois=True):
+    import time
+    import threading
+
+    def spinner_task(stop_event, msg):
+        spinner = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+        idx = 0
+        while not stop_event.is_set():
+            print(f"\r{GREEN}{spinner[idx % len(spinner)]} {msg}{RESET}", end="", flush=True)
+            idx += 1
+            time.sleep(0.1)
+        print('\r' + ' ' * (len(msg)+5) + '\r', end='', flush=True)
+
     log_lines = []
     log_lines.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scan de {ip} (timeout {timeout}s) :")
     print_separator("-")
-    print(f"🔍 {GREEN}Scan de {ip} (timeout {timeout}s){RESET}")
-    print_separator("-")
+
+    msg = f"Scan de {ip} (timeout {timeout}s)"
+    stop_event = threading.Event()
+    spinner_thread = threading.Thread(target=spinner_task, args=(stop_event, msg))
+    spinner_thread.start()
+
+    # Fonction pour vérifier l’accessibilité du service (page atteignable)
+    def check_service(url, timeout):
+        try:
+            resp = requests.get(url, timeout=timeout, verify=False)
+            if 200 <= resp.status_code < 400:
+                return "open"
+            else:
+                return "error"
+        except Exception:
+            return "error"
 
     def scan_one(args):
         port, proto = args
         url = f"{proto}://{ip}:{port}"
-        is_open = is_port_open(ip, port, timeout)
-        if is_open and check_protocol(ip, port, proto, timeout):
-            return (True, url)
-        else:
-            return (False, url)
+        start = time.perf_counter()
+        try:
+            is_open = is_port_open(ip, port, timeout)
+            time_taken = int((time.perf_counter() - start) * 1000)  # temps en ms
+
+            if is_open and check_protocol(ip, port, proto, timeout):
+                service_state = check_service(url, timeout=2)
+                if service_state == "open":
+                    return ("open", url, f"{time_taken} ms")
+                else:
+                    return ("error", url, f"{time_taken} ms")
+            elif not is_open:
+                if time_taken >= int(timeout * 1000):
+                    return ("closed", url, "TIMEOUT")
+                else:
+                    return ("closed", url, f"{time_taken} ms")
+            else:
+                return ("closed", url, "TIMEOUT")
+        except Exception:
+            return ("closed", url, "TIMEOUT")
 
     jobs = [(port, proto) for port in ports for proto in ["http", "https"]]
 
+    # Lancer le scan (avec le loader actif)
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-        for result, url in executor.map(scan_one, jobs):
-            status = f"{GREEN}OUVERT{RESET}" if result else f"{RED}FERMÉ{RESET}"
-            print(f"{'✅' if result else '❌'} {url.ljust(28)}  [{status}]")
-            log_lines.append(f"{'✅' if result else '❌'} {url}  [{'OUVERT' if result else 'FERMÉ'}]")
+        results = list(executor.map(scan_one, jobs))
 
-    # print_separator("-")
+    # Arrêter le loader
+    stop_event.set()
+    spinner_thread.join()
+
+    # Affichage des résultats
+    for result, url, timeinfo in results:
+        if result == "open":
+            status = f"{GREEN}OUVERT{RESET}"
+            symbol = f"{GREEN}✔{RESET}"
+        elif result == "error":
+            status = f"{YELLOW}ERREUR{RESET}"
+            symbol = f"{YELLOW}!{RESET}"
+        else:
+            status = f"{RED}FERMÉ{RESET}"
+            symbol = f"{RED}✖{RESET}"
+
+        if timeinfo == "TIMEOUT":
+            timing_str = f"{RED}[TIMEOUT]{RESET}"
+        else:
+            timing_str = f"[{YELLOW}{timeinfo}{RESET}]"
+
+        print(f"{symbol} {url.ljust(28)} [{status}] {timing_str}")
+        log_lines.append(f"{symbol} {url.ljust(28)} [{status}] {timing_str}")
+
     if whois and re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
         try:
             whois_str = get_ip_whois_log(ip)
@@ -215,8 +280,7 @@ def scan(ip, ports, timeout, logging=False, whois=True):
         except Exception as e:
             print_separator("-")
             print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
-            print_separator("-")
-    # print_separator("-")
+
     if logging:
         write_log('\n'.join(log_lines))
 
@@ -284,6 +348,13 @@ def manage_timeout(config):
     input("Appuie sur Entrée pour continuer...")
     print_separator("=")
 
+import warnings
+import urllib3
+import readchar
+from prompt_toolkit import PromptSession
+
+session = PromptSession()
+
 def main():
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     warnings.filterwarnings("ignore")
@@ -299,34 +370,40 @@ def main():
         else:
             first_run = False
 
-        key = readchar.readkey()
-        if key.lower() == 'p':
+        # PROMPT UNIQUE : une seule ligne pour tout
+        user_input = session.prompt(
+            f"\n[S]canner / [P]orts / [T]imeout / [L]ogs / [W]hois / [Q]uitter\n→ "
+        ).strip()
+        c = user_input.lower()
+
+        if not c:
+            continue
+        elif c in ['q', 'quit', 'exit']:
+            print(f"{RED}\nFermeture du programme.{RESET}")
+            break
+        elif c == 'p':
             manage_ports(config)
-        elif key.lower() == 't':
+        elif c == 't':
             manage_timeout(config)
-        elif key.lower() == 'l':
+        elif c == 'l':
             config['logging'] = not config.get('logging', False)
             save_config(config)
             print(f"{GREEN if config['logging'] else RED}Logs {'activés' if config['logging'] else 'désactivés'} !{RESET}")
             print_separator("=")
-        elif key.lower() == 'w':
+        elif c == 'w':
             config['whois'] = not config.get('whois', True)
             save_config(config)
             print(f"{BLUE if config['whois'] else RED}WHOIS {'activé' if config['whois'] else 'désactivé'} !{RESET}")
             print_separator("=")
-        elif key == readchar.key.CTRL_C:
-            print(f"{RED}\nFermeture du programme.{RESET}")
-            break
         else:
-            print(key, end="", flush=True)
-            ip = key + input()
-            target = ip.strip()
+            target = user_input
             if is_valid_ip_or_domain(target):
                 scan(target, config['ports'], config['timeout'],
                      logging=config.get('logging', False),
                      whois=config.get('whois', True))
             else:
-                print(f"{RED}❌ Adresse IP ou nom de domaine invalide : {target}{RESET}")
+                print(f"{RED}❌ Commande ou IP/domain invalide : {target}{RESET}")
+
 
 if __name__ == "__main__":
     try:
