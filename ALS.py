@@ -185,10 +185,59 @@ def print_ip_whois(ip):
         print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
         print_separator("-")
 
-def scan(ip, ports, timeout, logging=False, whois=True):
-    import time
-    import threading
+import ssl
+import time
+import threading
+import socket
+import requests
+import concurrent.futures
 
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   SSLAdapter : adapter pour requests afin d'utiliser un SSLContext "insecure"
+#   et d'autoriser la legacy renegotiation (si supportée)
+# ──────────────────────────────────────────────────────────────────────────────
+class SSLAdapter(HTTPAdapter):
+    """
+    Un adapter pour requests qui utilise un SSLContext personnalisé.
+    Cet adapter permet notamment de :
+      - désactiver la vérification de certificat (CERT_NONE),
+      - désactiver le check_hostname,
+      - activer OP_LEGACY_SERVER_CONNECT si disponible (legacy renegotiation).
+    """
+    def __init__(self, ssl_context, **kwargs):
+        self.ssl_context = ssl_context
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        # Crée un PoolManager qui utilise notre SSLContext personnalisé
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            ssl_context=self.ssl_context
+        )
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   scan : fonction principale de scan, remplace l’ancienne version sans bug SSL
+# ──────────────────────────────────────────────────────────────────────────────
+def scan(ip, ports, timeout, logging=False, whois=True):
+    # 1) Création d’un SSLContext qui désactive la vérification de certificat et autorise legacy renegotiation
+    ssl_ctx = ssl.create_default_context()
+
+    # Désactive la vérification du hostname (indispensable pour pouvoir mettre verify_mode à CERT_NONE)
+    ssl_ctx.check_hostname = False
+    # Désactive complètement la vérification de certificat
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    # Si OpenSSL/Python supporte OP_LEGACY_SERVER_CONNECT, on l’active pour autoriser
+    # la legacy renegotiation côté serveur (sinon on garde le contexte tel quel)
+    if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
+        ssl_ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
+
+    # ─── Spinner animé pendant le scan ───
     def spinner_task(stop_event, msg):
         spinner = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
         idx = 0
@@ -196,82 +245,108 @@ def scan(ip, ports, timeout, logging=False, whois=True):
             print(f"\r{GREEN}{spinner[idx % len(spinner)]} {msg}{RESET}", end="", flush=True)
             idx += 1
             time.sleep(0.1)
-        print('\r' + ' ' * (len(msg)+5) + '\r', end='', flush=True)
+        # Efface la ligne du spinner
+        print('\r' + ' ' * (len(msg) + 5) + '\r', end='', flush=True)
 
+    # Journalisation initiale
     log_lines = []
-    log_lines.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scan de {ip} (timeout {timeout}s) :")
+    log_lines.append(
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scan de {ip} (timeout {timeout}s) :"
+    )
     print_separator("-")
 
+    # Démarrage du spinner en tâche de fond
     msg = f"Scan de {ip} (timeout {timeout}s)"
     stop_event = threading.Event()
     spinner_thread = threading.Thread(target=spinner_task, args=(stop_event, msg))
     spinner_thread.start()
 
-    # Fonction pour vérifier l’accessibilité du service (page atteignable)
-    def check_service(url, timeout):
-        try:
-            resp = requests.get(url, timeout=timeout, verify=False)
-            if 200 <= resp.status_code < 400:
-                return "open"
-            else:
-                return "error"
-        except Exception:
-            return "error"
+    # ─── check_service_any_response : GET en streaming, sans redirect, via SSLAdapter ───
+    def check_service_any_response(url, timeout_http):
+        """
+        Tente une requête GET en streaming (stream=True) sans suivre les redirections (allow_redirects=False).
+        Utilise une Session qui monte notre SSLAdapter avec le SSLContext “insecure” configuré ci-dessus.
 
+        - Si on reçoit un code HTTP (quel qu’il soit) dans le délai `timeout_http` → return True (port ouvert).
+        - Sinon (timeout, handshake TLS KO, etc.) → return False (ERREUR).
+        En mode debug, on affiche le status_code ou l'exception levée.
+        """
+        try:
+            sess = requests.Session()
+            # Monte l’adapter HTTPS sur notre SSLContext personnalisé
+            sess.mount("https://", SSLAdapter(ssl_ctx))
+
+            # On fait un GET en streaming, sans redirection
+            resp = sess.get(
+                url,
+                timeout=timeout_http,      # même délai que le timeout TCP
+                verify=False,              # ignore le certificat auto-signé
+                stream=True,               # on ne charge que les en-têtes
+                allow_redirects=False      # ne pas suivre les 302/301
+            )
+            # Debug : montre quel code HTTP on reçoit
+            print(f"DEBUG: GET {url} → status_code={resp.status_code}")
+            # Toute réponse HTTP 1xx–5xx signifie “service existant” → ouvert
+            return True
+        except Exception as e:
+            print(f"DEBUG: GET {url} a levé : {e}")
+            return False
+
+    # ─── scan_one : test d’un seul port (TCP + HTTP/HTTPS) ───
     def scan_one(args):
         port, proto = args
         url = f"{proto}://{ip}:{port}"
+
+        # 1) Test TCP (socket.connect) pour mesurer la latence “pure”
         start = time.perf_counter()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
         try:
-            is_open = is_port_open(ip, port, timeout)
-            time_taken = int((time.perf_counter() - start) * 1000)  # temps en ms
+            sock.connect((ip, port))
+            connect_time = int((time.perf_counter() - start) * 1000)  # latence TCP en ms
+            sock.close()
+        except (socket.timeout, socket.error):
+            # Pas de connexion TCP → port “CLOSED”
+            sock.close()
+            return ("closed", url, None)
 
-            if is_open and check_protocol(ip, port, proto, timeout):
-                service_state = check_service(url, timeout=2)
-                if service_state == "open":
-                    return ("open", url, f"{time_taken} ms")
-                else:
-                    return ("error", url, f"{time_taken} ms")
-            elif not is_open:
-                if time_taken >= int(timeout * 1000):
-                    return ("closed", url, "TIMEOUT")
-                else:
-                    return ("closed", url, f"{time_taken} ms")
-            else:
-                return ("closed", url, "TIMEOUT")
-        except Exception:
-            return ("closed", url, "TIMEOUT")
+        # 2) Port TCP ouvert → on tente un GET HTTPS/HTTP en streaming (avec SSLAdapter)
+        service_ok = check_service_any_response(url, timeout_http=timeout)
+        if service_ok:
+            # Si on reçoit un code HTTP → port “OUVERT”
+            return ("open", url, f"{connect_time} ms")
+        else:
+            # Si le GET échoue (timeout > timeout_http, handshake TLS KO, etc.) → “ERREUR”
+            return ("error", url, f"{connect_time} ms")
 
+    # Prépare la liste des jobs : on teste chaque port en HTTP et HTTPS
     jobs = [(port, proto) for port in ports for proto in ["http", "https"]]
 
-    # Lancer le scan (avec le loader actif)
+    # ─── Exécution multithreadée du scan, spinner actif ───
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         results = list(executor.map(scan_one, jobs))
 
-    # Arrêter le loader
+    # Arrêt du spinner
     stop_event.set()
     spinner_thread.join()
 
-    # Affichage des résultats
+    # ─── Affichage final des résultats ───
     for result, url, timeinfo in results:
         if result == "open":
+            symbol = "🟢"
             status = f"{GREEN}OUVERT{RESET}"
-            symbol = f"{GREEN}✔{RESET}"
         elif result == "error":
+            symbol = "🟡"
             status = f"{YELLOW}ERREUR{RESET}"
-            symbol = f"{YELLOW}!{RESET}"
-        else:
-            status = f"{RED}FERMÉ{RESET}"
-            symbol = f"{RED}✖{RESET}"
+        else:  # "closed"
+            symbol = "🔴"
+            status = f"{RED}CLOSED{RESET}"
 
-        if timeinfo == "TIMEOUT":
-            timing_str = f"{RED}[TIMEOUT]{RESET}"
-        else:
-            timing_str = f"[{YELLOW}{timeinfo}{RESET}]"
-
+        timing_str = "" if timeinfo is None else f"[{YELLOW}{timeinfo}{RESET}]"
         print(f"{symbol} {url.ljust(28)} [{status}] {timing_str}")
         log_lines.append(f"{symbol} {url.ljust(28)} [{status}] {timing_str}")
 
+    # ─── WHOIS (si activé) ───
     if whois and re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
         try:
             whois_str = get_ip_whois_log(ip)
@@ -281,8 +356,10 @@ def scan(ip, ports, timeout, logging=False, whois=True):
             print_separator("-")
             print(f"{RED}❌ Impossible d'obtenir les infos Whois pour cette IP : {e}{RESET}")
 
+    # ─── Écriture du log (si demandé) ───
     if logging:
         write_log('\n'.join(log_lines))
+
 
 def manage_ports(config):
     print_separator("=")
